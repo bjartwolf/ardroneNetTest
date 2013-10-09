@@ -9,8 +9,11 @@ using AR.Drone.Client.Navigation;
 using AR.Drone.Client.Video;
 using AR.Drone.Data;
 using AR.Drone.Data.Navigation;
+using System.Reactive.Concurrency;
 using AR.Drone.Infrastructure;
 using AR.Drone.Client.Configuration;
+using System.Reactive;
+using System.Reactive.Linq;
 
 namespace AR.Drone.Client
 {
@@ -88,17 +91,37 @@ namespace AR.Drone.Client
             if (NavigationPacketParser.TryParse(ref packet, out navigationData))
             {
                 OnNavigationDataAcquired(navigationData);
-
+                OnNavigationDataAcquiredProper(new NavigationDataEventArgs { NavigationData = navigationData });
                 _navigationData = navigationData;
 
                 ProcessStateTransitions(navigationData.State);
             }
         }
 
+        public event EventHandler<NavigationDataEventArgs> NavigationDataAcquiredProper;
+
+        protected virtual void OnNavigationDataAcquiredProper(NavigationDataEventArgs e)
+        {
+            EventHandler<NavigationDataEventArgs> handler = NavigationDataAcquiredProper;
+            if (handler != null)
+            {
+                handler(this, e);
+            }
+        }
+
+        public class NavigationDataEventArgs : EventArgs
+        {
+            public NavigationData NavigationData{ get; set; }
+        }
+
+
+
         private void OnNavigationDataAcquired(NavigationData navigationData)
         {
-            if (NavigationDataAcquired != null)
+            if (NavigationDataAcquired != null) {
                 NavigationDataAcquired(navigationData);
+                OnNavigationDataAcquiredProper(new NavigationDataEventArgs{NavigationData = navigationData});
+                }
         }
 
         private void ProcessStateTransitions(NavigationState state)
@@ -180,6 +203,7 @@ namespace AR.Drone.Client
         /// This event will be dispatched on NavdataAcquisition thread.
         /// </summary>
         public event Action<NavigationData> NavigationDataAcquired;
+
 
         /// <summary>
         /// Event queue for all listeners interested in VideoPacketAcquired events.
@@ -294,6 +318,39 @@ namespace AR.Drone.Client
         {
             if (_navigationData.State.HasFlag(NavigationState.Landed))
                 _stateRequest = StateRequest.Fly;
+        }
+
+        public void SimulateHover(){
+        	NavigationDataAcquiredProper(this, new NavigationDataEventArgs{NavigationData = new NavigationData{ State = NavigationState.Hovering}});
+        }
+
+        public Task<bool> TakeoffAndHover()
+        {
+            sched = Scheduler.Default;
+            return TakeoffAndHover();
+
+        }
+
+        public IScheduler sched { get; set; }
+
+        public Task<bool> TakeoffAndHover(IScheduler scheduler)
+        {
+            this.sched = scheduler;
+            var tcs = new TaskCompletionSource<bool>();
+            var navdataStream = Observable.FromEventPattern<NavigationDataEventArgs>(this, "NavigationDataAcquiredProper");
+            var hovering = navdataStream.Where((navdata) => navdata.EventArgs.NavigationData.State.HasFlag(NavigationState.Hovering));
+            var emergency = navdataStream.Where((navdata) => navdata.EventArgs.NavigationData.State.HasFlag(NavigationState.Emergency));
+            var amb = Observable.Amb(hovering, emergency).Timeout(TimeSpan.FromSeconds(10), sched);
+            amb.Take(1).Subscribe((navdata) => {
+                if (navdata.EventArgs.NavigationData.State.HasFlag(NavigationState.Hovering)) {
+                    tcs.SetResult(true);
+                }
+                else {
+                    tcs.SetResult(false);
+                }
+            }, (ex) => tcs.SetResult(false));  //timeout
+            Takeoff();
+            return tcs.Task;
         }
 
         public void FlatTrim()
